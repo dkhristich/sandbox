@@ -8,10 +8,50 @@ import sys
 import csv
 import requests
 import time
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Union
 import argparse
 import warnings
+
+# Suppress urllib3 InsecureRequestWarning - we'll handle it with our own logging
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+def setup_logging(log_level: str = "INFO") -> None:
+    """
+    Setup logging configuration with formatted output.
+    
+    Args:
+        log_level: Log level string (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    """
+    # Convert string to logging level
+    numeric_level = getattr(logging, log_level.upper(), None)
+    if not isinstance(numeric_level, int):
+        raise ValueError(f'Invalid log level: {log_level}')
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        fmt='%(asctime)s [%(levelname)-8s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # Setup console handler
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=numeric_level,
+        handlers=[console_handler],
+        force=True  # Override any existing configuration
+    )
+    
+    logger.setLevel(numeric_level)
 
 
 def check_rate_limit(response: requests.Response) -> None:
@@ -40,7 +80,7 @@ def check_rate_limit(response: requests.Response) -> None:
         
         # Warn if we're running low on rate limit
         if percentage < 20:
-            print(f"⚠️  Rate limit warning: {remaining}/{limit} requests remaining ({percentage:.1f}%)", file=sys.stderr)
+            logger.warning(f"⚠️  Rate limit warning: {remaining}/{limit} requests remaining ({percentage:.1f}%)")
         
         # Show rate limit info every 10 pages or when low
         if remaining < 100 or (int(rate_remaining) % 100 == 0 and remaining < limit):
@@ -50,7 +90,7 @@ def check_rate_limit(response: requests.Response) -> None:
                     reset_timestamp = int(rate_reset)
                     reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
                     reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-                    print(f"Rate limit: {remaining}/{limit} remaining (resets at {reset_str})")
+                    logger.debug(f"Rate limit: {remaining}/{limit} remaining (resets at {reset_str})")
                 except (ValueError, OSError):
                     pass
 
@@ -87,9 +127,9 @@ def print_final_rate_limit(response: requests.Response) -> None:
             except (ValueError, OSError):
                 pass
         
-        print(f"\n📊 Final rate limit status: {remaining}/{limit} remaining ({used} used, {percentage:.1f}% remaining)")
+        logger.info(f"📊 Final rate limit status: {remaining}/{limit} remaining ({used} used, {percentage:.1f}% remaining)")
         if reset_str != "N/A":
-            print(f"   Rate limit resets at: {reset_str}")
+            logger.info(f"   Rate limit resets at: {reset_str}")
 
 
 def handle_rate_limit_error(response: requests.Response, max_retries: int = 3) -> bool:
@@ -108,7 +148,7 @@ def handle_rate_limit_error(response: requests.Response, max_retries: int = 3) -
     
     rate_reset = response.headers.get("X-RateLimit-Reset")
     if not rate_reset:
-        print("Rate limit exceeded, but reset time not available. Waiting 60 seconds...", file=sys.stderr)
+        logger.warning("Rate limit exceeded, but reset time not available. Waiting 60 seconds...")
         time.sleep(60)
         return True
     
@@ -120,23 +160,23 @@ def handle_rate_limit_error(response: requests.Response, max_retries: int = 3) -
         
         if wait_seconds > 0:
             reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
-            print(f"\n⏳ Rate limit exceeded. Waiting until {reset_str} ({wait_seconds} seconds)...", file=sys.stderr)
+            logger.warning(f"⏳ Rate limit exceeded. Waiting until {reset_str} ({wait_seconds} seconds)...")
             
             # Show progress for long waits
             if wait_seconds > 60:
                 while wait_seconds > 0:
                     mins, secs = divmod(wait_seconds, 60)
                     if wait_seconds % 60 == 0 or wait_seconds == 1:
-                        print(f"   Waiting... {mins}m {secs}s remaining", file=sys.stderr)
+                        logger.debug(f"   Waiting... {mins}m {secs}s remaining")
                     time.sleep(min(60, wait_seconds))
                     wait_seconds = max(0, wait_seconds - 60)
             else:
                 time.sleep(wait_seconds)
             
-            print("✅ Rate limit reset. Retrying...", file=sys.stderr)
+            logger.info("✅ Rate limit reset. Retrying...")
             return True
     except (ValueError, OSError) as e:
-        print(f"Error parsing rate limit reset time: {e}. Waiting 60 seconds...", file=sys.stderr)
+        logger.error(f"Error parsing rate limit reset time: {e}. Waiting 60 seconds...")
         time.sleep(60)
         return True
     
@@ -200,7 +240,7 @@ def get_workflow_runs_for_day(
             params = {
                 "per_page": per_page,
                 "page": page,
-                "created": f">={day_start_iso}"
+                "created": f"{day_start_iso}..{day_end_iso}"
             }
         
         try:
@@ -214,12 +254,12 @@ def get_workflow_runs_for_day(
                 if handle_rate_limit_error(response, max_retries):
                     retry_count += 1
                     if retry_count > max_retries:
-                        print("Max retries exceeded for rate limit. Exiting.", file=sys.stderr)
+                        logger.error("Max retries exceeded for rate limit. Exiting.")
                         sys.exit(1)
                     # Retry the same request
                     continue
                 else:
-                    print("Rate limit error could not be resolved. Exiting.", file=sys.stderr)
+                    logger.error("Rate limit error could not be resolved. Exiting.")
                     sys.exit(1)
             
             # Raise for other HTTP errors
@@ -298,33 +338,33 @@ def get_workflow_runs_for_day(
             time.sleep(0.1)
             
         except requests.exceptions.SSLError as e:
-            print(f"SSL Error: {e}", file=sys.stderr)
-            print("\nIf you're behind a corporate VPN/proxy, try one of these options:", file=sys.stderr)
-            print("  1. Use --no-ssl-verify (WARNING: insecure, use only if necessary)", file=sys.stderr)
-            print("  2. Use --ca-bundle <path> to specify your corporate CA certificate", file=sys.stderr)
-            print("  3. Export REQUESTS_CA_BUNDLE environment variable pointing to your CA bundle", file=sys.stderr)
+            logger.error(f"SSL Error: {e}")
+            logger.error("If you're behind a corporate VPN/proxy, try one of these options:")
+            logger.error("  1. Use --no-ssl-verify (WARNING: insecure, use only if necessary)")
+            logger.error("  2. Use --ca-bundle <path> to specify your corporate CA certificate")
+            logger.error("  3. Export REQUESTS_CA_BUNDLE environment variable pointing to your CA bundle")
             sys.exit(1)
         except requests.exceptions.HTTPError as e:
             # Handle other HTTP errors (not rate limit)
             if e.response and e.response.status_code == 403:
                 # This should have been handled above, but just in case
                 if not handle_rate_limit_error(e.response, max_retries):
-                    print(f"HTTP Error {e.response.status_code}: {e}", file=sys.stderr)
+                    logger.error(f"HTTP Error {e.response.status_code}: {e}")
                     if hasattr(e.response, 'text'):
-                        print(f"Response: {e.response.text}", file=sys.stderr)
+                        logger.debug(f"Response: {e.response.text}")
                     sys.exit(1)
                 continue
             else:
-                print(f"HTTP Error: {e}", file=sys.stderr)
+                logger.error(f"HTTP Error: {e}")
                 if hasattr(e, 'response') and e.response is not None:
                     if hasattr(e.response, 'text'):
-                        print(f"Response: {e.response.text}", file=sys.stderr)
+                        logger.debug(f"Response: {e.response.text}")
                 sys.exit(1)
         except requests.exceptions.RequestException as e:
-            print(f"Error fetching workflow runs: {e}", file=sys.stderr)
+            logger.error(f"Error fetching workflow runs: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 if hasattr(e.response, 'text'):
-                    print(f"Response: {e.response.text}", file=sys.stderr)
+                    logger.debug(f"Response: {e.response.text}")
             sys.exit(1)
     
     return all_runs, last_response, hit_limit
@@ -363,8 +403,8 @@ def get_workflow_runs(
     # Calculate the overall cutoff date
     cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
     
-    print(f"Fetching workflow runs from the last {days} days (since {cutoff_date.date()})...")
-    print(f"Splitting into {days} daily requests to avoid API limits...")
+    logger.info(f"Fetching workflow runs from the last {days} days (since {cutoff_date.date()})...")
+    logger.info(f"Splitting into {days} daily requests to avoid API limits...")
     
     all_runs = []
     days_with_limits = []
@@ -400,7 +440,7 @@ def get_workflow_runs(
         if hit_limit:
             days_with_limits.append(day_date)
         
-        print(f"  Day {day_offset + 1}/{days} ({day_date}): {len(day_runs)} runs (total: {len(all_runs)})")
+        logger.info(f"  Day {day_offset + 1}/{days} ({day_date}): {len(day_runs)} runs (total: {len(all_runs)})")
         
         # Small delay between days
         if day_offset < days - 1:
@@ -408,24 +448,24 @@ def get_workflow_runs(
     
     # Print warnings for days that hit the limit
     if days_with_limits:
-        print(f"\n⚠️  WARNING: Hit 1000 result limit for {len(days_with_limits)} day(s):", file=sys.stderr)
+        logger.warning(f"⚠️  WARNING: Hit 1000 result limit for {len(days_with_limits)} day(s):")
         for day in days_with_limits:
-            print(f"   - {day}: Some workflow runs may be missing", file=sys.stderr)
-        print(f"   Consider using smaller time windows or check GitHub API documentation.", file=sys.stderr)
+            logger.warning(f"   - {day}: Some workflow runs may be missing")
+        logger.warning(f"   Consider using smaller time windows or check GitHub API documentation.")
     
-    print(f"\nTotal workflow runs found: {len(all_runs)}")
+    logger.info(f"Total workflow runs found: {len(all_runs)}")
     
     # Print statistics by day
     if daily_stats:
-        print(f"\n📊 Statistics by day:")
-        print(f"   {'Date':<12} {'Runs':<8} {'Status'}")
-        print(f"   {'-' * 12} {'-' * 8} {'-' * 20}")
+        logger.info(f"📊 Statistics by day:")
+        logger.info(f"   {'Date':<12} {'Runs':<8} {'Status'}")
+        logger.info(f"   {'-' * 12} {'-' * 8} {'-' * 20}")
         
         # Sort by date (most recent first)
         sorted_days = sorted(daily_stats.items(), reverse=True)
         for day_date, count in sorted_days:
             status = "⚠️  Limit hit" if day_date in days_with_limits else "✓"
-            print(f"   {day_date}    {count:<8} {status}")
+            logger.info(f"   {day_date}    {count:<8} {status}")
         
         # Summary
         total_days = len(daily_stats)
@@ -433,12 +473,12 @@ def get_workflow_runs(
         max_runs_day = max(daily_stats.items(), key=lambda x: x[1]) if daily_stats else None
         avg_runs = sum(daily_stats.values()) / total_days if total_days > 0 else 0
         
-        print(f"\n   Summary:")
-        print(f"   - Days processed: {total_days}")
-        print(f"   - Days with runs: {days_with_runs}")
+        logger.info(f"   Summary:")
+        logger.info(f"   - Days processed: {total_days}")
+        logger.info(f"   - Days with runs: {days_with_runs}")
         if max_runs_day:
-            print(f"   - Busiest day: {max_runs_day[0]} ({max_runs_day[1]} runs)")
-        print(f"   - Average runs per day: {avg_runs:.1f}")
+            logger.info(f"   - Busiest day: {max_runs_day[0]} ({max_runs_day[1]} runs)")
+        logger.info(f"   - Average runs per day: {avg_runs:.1f}")
     
     # Print final rate limit status
     if last_response:
@@ -488,7 +528,7 @@ def filter_latest_runs_per_workflow(runs: List[Dict]) -> List[Dict]:
                 workflows[workflow_id] = run
     
     latest_runs = list(workflows.values())
-    print(f"Filtered to {len(latest_runs)} latest runs (one per workflow)")
+    logger.info(f"Filtered to {len(latest_runs)} latest runs (one per workflow)")
     return latest_runs
 
 
@@ -536,7 +576,7 @@ def save_to_csv(details: List[Dict], filepath: str = "workflow_runs.csv"):
         filepath: Full path to output CSV file (including directory)
     """
     if not details:
-        print("No workflow runs to save.")
+        logger.warning("No workflow runs to save.")
         return
     
     # Create directory if it doesn't exist
@@ -561,7 +601,7 @@ def save_to_csv(details: List[Dict], filepath: str = "workflow_runs.csv"):
         writer.writeheader()
         writer.writerows(details)
     
-    print(f"Saved {len(details)} workflow runs to {filepath}")
+    logger.info(f"Saved {len(details)} workflow runs to {filepath}")
 
 
 def main():
@@ -616,42 +656,50 @@ def main():
         type=str,
         help="Path to custom CA bundle file for SSL verification (useful for corporate VPN/proxy)"
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Set the logging level (default: INFO)"
+    )
     
     args = parser.parse_args()
     
+    # Setup logging first
+    setup_logging(args.log_level)
+    
     # Handle SSL verification
     if args.no_ssl_verify and args.ca_bundle:
-        print("Error: Cannot use both --no-ssl-verify and --ca-bundle. Choose one.", file=sys.stderr)
+        logger.error("Cannot use both --no-ssl-verify and --ca-bundle. Choose one.")
         sys.exit(1)
     
     verify_ssl = True
     if args.no_ssl_verify:
         verify_ssl = False
-        warnings.warn(
-            "SSL verification is disabled. This makes your connection insecure! "
-            "Only use this option if you're behind a corporate VPN/proxy and understand the risks.",
-            UserWarning
-        )
-        print("WARNING: SSL verification is disabled. Connection is not secure!", file=sys.stderr)
+        # Suppress urllib3 warnings since we're logging our own warning
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        logger.warning("SSL verification is disabled. Connection is not secure!")
+        logger.warning("This makes your connection insecure! Only use this option if you're behind a corporate VPN/proxy and understand the risks.")
     elif args.ca_bundle:
         if not os.path.exists(args.ca_bundle):
-            print(f"Error: CA bundle file not found: {args.ca_bundle}", file=sys.stderr)
+            logger.error(f"CA bundle file not found: {args.ca_bundle}")
             sys.exit(1)
         verify_ssl = args.ca_bundle
-        print(f"Using custom CA bundle: {args.ca_bundle}")
+        logger.info(f"Using custom CA bundle: {args.ca_bundle}")
     
     # Validate required arguments
     if not args.owner:
-        print("Error: Repository owner is required. Use --owner or set GITHUB_OWNER env var.", file=sys.stderr)
+        logger.error("Repository owner is required. Use --owner or set GITHUB_OWNER env var.")
         sys.exit(1)
     
     if not args.repo:
-        print("Error: Repository name is required. Use --repo or set GITHUB_REPO env var.", file=sys.stderr)
+        logger.error("Repository name is required. Use --repo or set GITHUB_REPO env var.")
         sys.exit(1)
     
     if not args.token:
-        print("Error: GitHub token is required. Use --token or set GITHUB_TOKEN env var.", file=sys.stderr)
-        print("You can create a token at: https://github.com/settings/tokens", file=sys.stderr)
+        logger.error("GitHub token is required. Use --token or set GITHUB_TOKEN env var.")
+        logger.error("You can create a token at: https://github.com/settings/tokens")
         sys.exit(1)
     
     # Determine output file path

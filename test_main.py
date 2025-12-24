@@ -8,6 +8,7 @@ import sys
 import os
 import csv
 import tempfile
+import logging
 from unittest.mock import Mock, patch, MagicMock
 from datetime import datetime, timedelta, timezone
 import requests
@@ -148,6 +149,8 @@ class TestSaveToCSV:
     
     def test_save_to_csv_empty_list(self, capsys):
         """Test saving empty list (should print message and not create file)."""
+        # Setup logging for the test
+        main.setup_logging("INFO")
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.csv') as f:
             filename = f.name
         
@@ -480,8 +483,11 @@ class TestGetWorkflowRuns:
             assert call[1]["verify"] == ca_bundle_path
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_ssl_error(self, mock_get, capsys):
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_ssl_error(self, mock_sleep, mock_get, capsys):
         """Test handling of SSL errors with helpful error message."""
+        # Setup logging for the test
+        main.setup_logging("INFO")
         mock_get.side_effect = requests.exceptions.SSLError("certificate verify failed")
         
         with pytest.raises(SystemExit) as exc_info:
@@ -490,10 +496,10 @@ class TestGetWorkflowRuns:
         # The function should exit with code 1
         assert exc_info.value.code == 1
         
-        # Check that helpful error message is printed
+        # Check that helpful error message is logged (logging outputs to stdout)
         captured = capsys.readouterr()
-        assert "SSL Error" in captured.err
-        assert "--no-ssl-verify" in captured.err or "--ca-bundle" in captured.err
+        assert "SSL Error" in captured.out
+        assert "--no-ssl-verify" in captured.out or "--ca-bundle" in captured.out
     
     @patch('main.requests.get')
     @patch('main.time.sleep')
@@ -573,6 +579,8 @@ class TestRateLimitHandling:
     
     def test_check_rate_limit_low(self, capsys):
         """Test rate limit checking when remaining is low."""
+        # Setup logging for the test
+        main.setup_logging("INFO")
         mock_response = Mock()
         mock_response.headers = {
             "X-RateLimit-Limit": "5000",
@@ -583,7 +591,7 @@ class TestRateLimitHandling:
         main.check_rate_limit(mock_response)
         
         captured = capsys.readouterr()
-        assert "Rate limit warning" in captured.err
+        assert "Rate limit warning" in captured.out
     
     def test_handle_rate_limit_error_with_reset_time(self):
         """Test handling rate limit error with reset time."""
@@ -831,7 +839,7 @@ class TestMain:
                 main.main()
         
         captured = capsys.readouterr()
-        assert "Repository owner is required" in captured.err
+        assert "Repository owner is required" in captured.out
     
     def test_main_missing_repo(self, capsys):
         """Test main with missing repo argument."""
@@ -845,7 +853,7 @@ class TestMain:
                 main.main()
         
         captured = capsys.readouterr()
-        assert "Repository name is required" in captured.err
+        assert "Repository name is required" in captured.out
     
     def test_main_missing_token(self, capsys):
         """Test main with missing token argument."""
@@ -859,7 +867,7 @@ class TestMain:
                 main.main()
         
         captured = capsys.readouterr()
-        assert "GitHub token is required" in captured.err
+        assert "GitHub token is required" in captured.out
     
     @patch.dict(os.environ, {
         'GITHUB_OWNER': 'envowner',
@@ -945,7 +953,7 @@ class TestMain:
                 main.main()
         
         captured = capsys.readouterr()
-        assert "Cannot use both --no-ssl-verify and --ca-bundle" in captured.err
+        assert "Cannot use both --no-ssl-verify and --ca-bundle" in captured.out
     
     @patch('main.get_workflow_runs')
     @patch('main.extract_workflow_details')
