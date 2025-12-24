@@ -369,6 +369,7 @@ def get_workflow_runs(
     all_runs = []
     days_with_limits = []
     last_response = None
+    daily_stats = {}  # Track runs per day: {date: count}
     
     # Process each day separately (from most recent to oldest)
     for day_offset in range(days):
@@ -392,10 +393,14 @@ def get_workflow_runs(
         if response:
             last_response = response
         
-        if hit_limit:
-            days_with_limits.append(day_start.date())
+        # Track statistics for this day
+        day_date = day_start.date()
+        daily_stats[day_date] = len(day_runs)
         
-        print(f"  Day {day_offset + 1}/{days} ({day_start.date()}): {len(day_runs)} runs (total: {len(all_runs)})")
+        if hit_limit:
+            days_with_limits.append(day_date)
+        
+        print(f"  Day {day_offset + 1}/{days} ({day_date}): {len(day_runs)} runs (total: {len(all_runs)})")
         
         # Small delay between days
         if day_offset < days - 1:
@@ -409,6 +414,31 @@ def get_workflow_runs(
         print(f"   Consider using smaller time windows or check GitHub API documentation.", file=sys.stderr)
     
     print(f"\nTotal workflow runs found: {len(all_runs)}")
+    
+    # Print statistics by day
+    if daily_stats:
+        print(f"\n📊 Statistics by day:")
+        print(f"   {'Date':<12} {'Runs':<8} {'Status'}")
+        print(f"   {'-' * 12} {'-' * 8} {'-' * 20}")
+        
+        # Sort by date (most recent first)
+        sorted_days = sorted(daily_stats.items(), reverse=True)
+        for day_date, count in sorted_days:
+            status = "⚠️  Limit hit" if day_date in days_with_limits else "✓"
+            print(f"   {day_date}    {count:<8} {status}")
+        
+        # Summary
+        total_days = len(daily_stats)
+        days_with_runs = sum(1 for count in daily_stats.values() if count > 0)
+        max_runs_day = max(daily_stats.items(), key=lambda x: x[1]) if daily_stats else None
+        avg_runs = sum(daily_stats.values()) / total_days if total_days > 0 else 0
+        
+        print(f"\n   Summary:")
+        print(f"   - Days processed: {total_days}")
+        print(f"   - Days with runs: {days_with_runs}")
+        if max_runs_day:
+            print(f"   - Busiest day: {max_runs_day[0]} ({max_runs_day[1]} runs)")
+        print(f"   - Average runs per day: {avg_runs:.1f}")
     
     # Print final rate limit status
     if last_response:
