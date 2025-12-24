@@ -143,47 +143,52 @@ def handle_rate_limit_error(response: requests.Response, max_retries: int = 3) -
     return False
 
 
-def get_workflow_runs(
+def get_workflow_runs_for_day(
     owner: str,
     repo: str,
     token: str,
-    days: int = 14,
+    day_start: datetime,
+    day_end: datetime,
     per_page: int = 100,
-    verify_ssl: Union[bool, str] = True
-) -> List[Dict]:
+    verify_ssl: Union[bool, str] = True,
+    base_url: str = None,
+    headers: Dict = None
+) -> tuple[List[Dict], requests.Response, bool]:
     """
-    Fetch workflow runs from GitHub API for the specified repository.
+    Fetch workflow runs for a single day.
     
     Args:
         owner: Repository owner (username or organization)
         repo: Repository name
         token: GitHub personal access token
-        days: Number of days to look back (default: 14 for 2 weeks)
+        day_start: Start of the day (inclusive)
+        day_end: End of the day (exclusive)
         per_page: Number of results per page (max 100)
-        verify_ssl: SSL verification setting. True (default) to verify,
-                   False to disable (not recommended), or path to CA bundle file
+        verify_ssl: SSL verification setting
+        base_url: Base URL for API (for reuse)
+        headers: Headers dict (for reuse)
     
     Returns:
-        List of workflow run dictionaries
+        Tuple of (list of runs, last response, hit_limit_flag)
     """
-    base_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
-    headers = {
-        "Accept": "application/vnd.github.v3+json",
-        "Authorization": f"token {token}"
-    }
+    if base_url is None:
+        base_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
+    if headers is None:
+        headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": f"token {token}"
+        }
     
-    # Calculate the date 2 weeks ago
-    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
-    cutoff_iso = cutoff_date.isoformat().replace("+00:00", "Z")
+    day_start_iso = day_start.isoformat().replace("+00:00", "Z")
+    day_end_iso = day_end.isoformat().replace("+00:00", "Z")
     
     all_runs = []
     page = 1
     retry_count = 0
     max_retries = 3
-    next_url = None  # Will be set from Link header
-    last_response = None  # Store last successful response for final rate limit check
-    
-    print(f"Fetching workflow runs from the last {days} days (since {cutoff_date.date()})...")
+    next_url = None
+    last_response = None
+    hit_limit = False
     
     while True:
         # Use next_url from Link header if available, otherwise construct URL with params
@@ -195,7 +200,7 @@ def get_workflow_runs(
             params = {
                 "per_page": per_page,
                 "page": page,
-                "created": f">={cutoff_iso}"
+                "created": f">={day_start_iso}"
             }
         
         try:
@@ -228,16 +233,25 @@ def get_workflow_runs(
             if not runs:
                 break
             
-            # Filter runs that are actually within our date range
+            # Filter runs that are actually within our day range
             filtered_runs = []
+            runs_outside_day = False
             for run in runs:
                 created_at = datetime.fromisoformat(
                     run["created_at"].replace("Z", "+00:00")
                 )
-                if created_at >= cutoff_date:
+                if day_start <= created_at < day_end:
                     filtered_runs.append(run)
+                elif created_at < day_start:
+                    # We've gone past the start of the day, stop paginating
+                    runs_outside_day = True
+                    break
             
             all_runs.extend(filtered_runs)
+            
+            # If we got runs outside our day range, we're done with this day
+            if runs_outside_day:
+                break
             
             # Check for next page using Link header (GitHub's recommended pagination method)
             next_url = None
@@ -259,38 +273,26 @@ def get_workflow_runs(
             if not next_url and len(runs) < per_page:
                 break
             
-            # If no next link and we've hit exactly 1000 results, check if we need to continue
-            # GitHub API may limit results to 1000, but we should try to get more by narrowing date range
+            # Check if we hit the 1000 result limit for this day
             if not next_url and len(all_runs) >= 1000:
-                # Check if we've actually reached the cutoff date
-                if filtered_runs:
-                    oldest_run = min(
-                        datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
-                        for r in filtered_runs
-                    )
-                    if oldest_run >= cutoff_date:
-                        # We hit 1000 results but haven't reached the cutoff date yet
-                        print(f"⚠️  Warning: Fetched {len(all_runs)} runs. "
-                              f"GitHub API may limit results to 1000 per query. "
-                              f"Consider using a shorter --days period to get all runs.", file=sys.stderr)
+                got_full_page = len(runs) == per_page
+                at_exact_limit = len(all_runs) == 1000
+                if got_full_page and at_exact_limit:
+                    hit_limit = True
                 break
             
-            # If the oldest run is before our cutoff, we can stop
-            oldest_run = min(
-                datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
-                for r in filtered_runs
-            ) if filtered_runs else None
-            
-            if oldest_run and oldest_run < cutoff_date:
+            # If no next URL and no filtered runs, we're done (all runs were outside day range)
+            if not next_url and not filtered_runs:
                 break
             
             # If no next URL, increment page number for fallback
             if not next_url:
                 page += 1
+                # Safety check: if we've gone too many pages without a next URL, break
+                if page > 100:  # Max 100 pages = 10,000 results per day (should never happen)
+                    break
             else:
                 page += 1  # Keep track for logging
-            
-            print(f"Fetched page {page - 1}, total runs so far: {len(all_runs)}")
             
             # Small delay to avoid hitting rate limits too quickly
             time.sleep(0.1)
@@ -325,7 +327,88 @@ def get_workflow_runs(
                     print(f"Response: {e.response.text}", file=sys.stderr)
             sys.exit(1)
     
-    print(f"Total workflow runs found: {len(all_runs)}")
+    return all_runs, last_response, hit_limit
+
+
+def get_workflow_runs(
+    owner: str,
+    repo: str,
+    token: str,
+    days: int = 14,
+    per_page: int = 100,
+    verify_ssl: Union[bool, str] = True
+) -> List[Dict]:
+    """
+    Fetch workflow runs from GitHub API for the specified repository.
+    Splits the date range into daily requests to avoid API limits.
+    
+    Args:
+        owner: Repository owner (username or organization)
+        repo: Repository name
+        token: GitHub personal access token
+        days: Number of days to look back (default: 14 for 2 weeks)
+        per_page: Number of results per page (max 100)
+        verify_ssl: SSL verification setting. True (default) to verify,
+                   False to disable (not recommended), or path to CA bundle file
+    
+    Returns:
+        List of workflow run dictionaries
+    """
+    base_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
+    headers = {
+        "Accept": "application/vnd.github.v3+json",
+        "Authorization": f"token {token}"
+    }
+    
+    # Calculate the overall cutoff date
+    cutoff_date = datetime.now(timezone.utc) - timedelta(days=days)
+    
+    print(f"Fetching workflow runs from the last {days} days (since {cutoff_date.date()})...")
+    print(f"Splitting into {days} daily requests to avoid API limits...")
+    
+    all_runs = []
+    days_with_limits = []
+    last_response = None
+    
+    # Process each day separately (from most recent to oldest)
+    for day_offset in range(days):
+        # Calculate day boundaries (start of day to start of next day)
+        # day_offset=0 is today, day_offset=1 is yesterday, etc.
+        day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=day_offset)
+        day_end = day_start + timedelta(days=1)
+        
+        # Don't go beyond the cutoff date
+        if day_start < cutoff_date:
+            day_start = cutoff_date
+            if day_start >= day_end:
+                # We've reached the cutoff, no need to process more days
+                break
+        
+        day_runs, response, hit_limit = get_workflow_runs_for_day(
+            owner, repo, token, day_start, day_end, per_page, verify_ssl, base_url, headers
+        )
+        
+        all_runs.extend(day_runs)
+        if response:
+            last_response = response
+        
+        if hit_limit:
+            days_with_limits.append(day_start.date())
+        
+        print(f"  Day {day_offset + 1}/{days} ({day_start.date()}): {len(day_runs)} runs (total: {len(all_runs)})")
+        
+        # Small delay between days
+        if day_offset < days - 1:
+            time.sleep(0.2)
+    
+    # Print warnings for days that hit the limit
+    if days_with_limits:
+        print(f"\n⚠️  WARNING: Hit 1000 result limit for {len(days_with_limits)} day(s):", file=sys.stderr)
+        for day in days_with_limits:
+            print(f"   - {day}: Some workflow runs may be missing", file=sys.stderr)
+        print(f"   Consider using smaller time windows or check GitHub API documentation.", file=sys.stderr)
+    
+    print(f"\nTotal workflow runs found: {len(all_runs)}")
     
     # Print final rate limit status
     if last_response:

@@ -212,111 +212,154 @@ class TestGetWorkflowRuns:
     """Tests for get_workflow_runs function."""
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_single_page(self, mock_get):
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_single_page(self, mock_sleep, mock_get):
         """Test fetching workflow runs from a single page."""
-        # Mock response
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        }
-        mock_response.json.return_value = {
-            "workflow_runs": [
-                {
-                    "name": "CI",
-                    "id": 456,
-                    "created_at": (datetime.now(timezone.utc) - timedelta(days=5)).isoformat().replace("+00:00", "Z"),
-                    "status": "completed",
+        # Mock response for each day (14 days = 14 calls)
+        # Most days will be empty, one day will have a run
+        now = datetime.now(timezone.utc)
+        
+        mock_responses = []
+        for day_offset in range(14):
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.headers = {
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Remaining": str(5000 - day_offset),
+                "X-RateLimit-Reset": str(int(now.timestamp()) + 3600)
+            }
+            # Day 5 (5 days ago) will have a run
+            if day_offset == 5:
+                mock_response.json.return_value = {
+                    "workflow_runs": [
+                        {
+                            "name": "CI",
+                            "id": 456,
+                            "created_at": (now - timedelta(days=5, hours=12)).isoformat().replace("+00:00", "Z"),
+                            "status": "completed",
+                        }
+                    ]
                 }
-            ]
-        }
-        mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+            else:
+                mock_response.json.return_value = {"workflow_runs": []}
+            mock_response.raise_for_status = Mock()
+            mock_response.links = {}  # No pagination links
+            mock_responses.append(mock_response)
+        
+        mock_get.side_effect = mock_responses
         
         runs = main.get_workflow_runs("owner", "repo", "token", days=14)
         
         assert len(runs) == 1
         assert runs[0]["name"] == "CI"
-        mock_get.assert_called_once()
+        # Should be called 14 times (once per day)
+        assert mock_get.call_count == 14
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_pagination(self, mock_get):
-        """Test fetching workflow runs across multiple pages."""
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_pagination(self, mock_sleep, mock_get):
+        """Test fetching workflow runs across multiple pages within a day."""
         now = datetime.now(timezone.utc)
         
-        # First page response
-        mock_response_page1 = Mock()
-        mock_response_page1.status_code = 200
-        mock_response_page1.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4998",
-            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        }
-        mock_response_page1.json.return_value = {
-            "workflow_runs": [
-                {
-                    "name": "CI",
-                    "id": i,
-                    "created_at": (now - timedelta(days=i)).isoformat().replace("+00:00", "Z"),
-                    "status": "completed",
+        # Create responses for 14 days
+        mock_responses = []
+        for day_offset in range(14):
+            # Day 0 will have pagination (2 pages)
+            if day_offset == 0:
+                # First page for day 0
+                mock_response_page1 = Mock()
+                mock_response_page1.status_code = 200
+                mock_response_page1.headers = {
+                    "X-RateLimit-Limit": "5000",
+                    "X-RateLimit-Remaining": str(5000 - day_offset * 2),
+                    "X-RateLimit-Reset": str(int(now.timestamp()) + 3600)
                 }
-                for i in range(1, 6)  # 5 runs
-            ]
-        }
-        mock_response_page1.raise_for_status = Mock()
+                mock_response_page1.json.return_value = {
+                    "workflow_runs": [
+                        {
+                            "name": "CI",
+                            "id": i,
+                            "created_at": (now - timedelta(hours=i)).isoformat().replace("+00:00", "Z"),
+                            "status": "completed",
+                        }
+                        for i in range(1, 6)  # 5 runs
+                    ]
+                }
+                mock_response_page1.raise_for_status = Mock()
+                mock_response_page1.links = {"next": {"url": "http://example.com/page2"}}
+                mock_responses.append(mock_response_page1)
+                
+                # Second page for day 0 (empty)
+                mock_response_page2 = Mock()
+                mock_response_page2.status_code = 200
+                mock_response_page2.headers = {
+                    "X-RateLimit-Limit": "5000",
+                    "X-RateLimit-Remaining": str(5000 - day_offset * 2 - 1),
+                    "X-RateLimit-Reset": str(int(now.timestamp()) + 3600)
+                }
+                mock_response_page2.json.return_value = {"workflow_runs": []}
+                mock_response_page2.raise_for_status = Mock()
+                mock_response_page2.links = {}
+                mock_responses.append(mock_response_page2)
+            else:
+                # Empty responses for other days
+                mock_response = Mock()
+                mock_response.status_code = 200
+                mock_response.headers = {
+                    "X-RateLimit-Limit": "5000",
+                    "X-RateLimit-Remaining": str(5000 - day_offset * 2),
+                    "X-RateLimit-Reset": str(int(now.timestamp()) + 3600)
+                }
+                mock_response.json.return_value = {"workflow_runs": []}
+                mock_response.raise_for_status = Mock()
+                mock_response.links = {}
+                mock_responses.append(mock_response)
         
-        # Second page response (empty)
-        mock_response_page2 = Mock()
-        mock_response_page2.status_code = 200
-        mock_response_page2.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4997",
-            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        }
-        mock_response_page2.json.return_value = {
-            "workflow_runs": []
-        }
-        mock_response_page2.raise_for_status = Mock()
-        
-        mock_get.side_effect = [mock_response_page1, mock_response_page2]
+        mock_get.side_effect = mock_responses
         
         runs = main.get_workflow_runs("owner", "repo", "token", days=14, per_page=5)
         
         assert len(runs) == 5
-        assert mock_get.call_count == 2
+        # 14 days + 1 extra page for day 0 = 15 calls
+        assert mock_get.call_count == 15
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_date_filtering(self, mock_get):
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_date_filtering(self, mock_sleep, mock_get):
         """Test that runs outside the date range are filtered out."""
         now = datetime.now(timezone.utc)
         
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        }
-        mock_response.json.return_value = {
-            "workflow_runs": [
-                {
-                    "name": "CI",
-                    "id": 1,
-                    "created_at": (now - timedelta(days=5)).isoformat().replace("+00:00", "Z"),  # Within range
-                    "status": "completed",
-                },
-                {
-                    "name": "Deploy",
-                    "id": 2,
-                    "created_at": (now - timedelta(days=20)).isoformat().replace("+00:00", "Z"),  # Outside range
-                    "status": "completed",
+        # Create responses for 14 days
+        mock_responses = []
+        for day_offset in range(14):
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.headers = {
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Remaining": str(5000 - day_offset),
+                "X-RateLimit-Reset": str(int(now.timestamp()) + 3600)
+            }
+            
+            # Day 5 (5 days ago) will have a run within range
+            if day_offset == 5:
+                mock_response.json.return_value = {
+                    "workflow_runs": [
+                        {
+                            "name": "CI",
+                            "id": 1,
+                            "created_at": (now - timedelta(days=5, hours=12)).isoformat().replace("+00:00", "Z"),  # Within range
+                            "status": "completed",
+                        }
+                    ]
                 }
-            ]
-        }
-        mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+            else:
+                mock_response.json.return_value = {"workflow_runs": []}
+            
+            mock_response.raise_for_status = Mock()
+            mock_response.links = {}
+            mock_responses.append(mock_response)
+        
+        mock_get.side_effect = mock_responses
         
         runs = main.get_workflow_runs("owner", "repo", "token", days=14)
         
@@ -325,8 +368,10 @@ class TestGetWorkflowRuns:
         assert runs[0]["id"] == 1
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_api_error(self, mock_get):
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_api_error(self, mock_sleep, mock_get):
         """Test handling of API errors."""
+        # First day will have an error
         mock_response = Mock()
         mock_response.status_code = 404
         mock_response.headers = {
@@ -342,69 +387,97 @@ class TestGetWorkflowRuns:
             main.get_workflow_runs("owner", "repo", "token", days=14)
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_correct_url_and_headers(self, mock_get):
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_correct_url_and_headers(self, mock_sleep, mock_get):
         """Test that the correct URL and headers are used."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        }
-        mock_response.json.return_value = {"workflow_runs": []}
-        mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+        # Create empty responses for 7 days
+        mock_responses = []
+        for _ in range(7):
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.headers = {
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Remaining": "4999",
+                "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+            }
+            mock_response.json.return_value = {"workflow_runs": []}
+            mock_response.raise_for_status = Mock()
+            mock_response.links = {}
+            mock_responses.append(mock_response)
+        
+        mock_get.side_effect = mock_responses
         
         main.get_workflow_runs("testowner", "testrepo", "testtoken", days=7)
         
-        # Verify URL
-        assert "testowner" in mock_get.call_args[0][0]
-        assert "testrepo" in mock_get.call_args[0][0]
+        # Verify URL (check first call)
+        assert "testowner" in mock_get.call_args_list[0][0][0]
+        assert "testrepo" in mock_get.call_args_list[0][0][0]
         
-        # Verify headers
-        headers = mock_get.call_args[1]["headers"]
+        # Verify headers (check first call)
+        headers = mock_get.call_args_list[0][1]["headers"]
         assert headers["Authorization"] == "token testtoken"
         assert headers["Accept"] == "application/vnd.github.v3+json"
         
         # Verify SSL verification is enabled by default
-        assert mock_get.call_args[1]["verify"] is True
+        assert mock_get.call_args_list[0][1]["verify"] is True
+        
+        # Should be called 7 times (once per day)
+        assert mock_get.call_count == 7
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_verify_ssl_false(self, mock_get):
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_verify_ssl_false(self, mock_sleep, mock_get):
         """Test that verify_ssl=False is passed to requests."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        }
-        mock_response.json.return_value = {"workflow_runs": []}
-        mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+        # Create empty responses for 7 days
+        mock_responses = []
+        for _ in range(7):
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.headers = {
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Remaining": "4999",
+                "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+            }
+            mock_response.json.return_value = {"workflow_runs": []}
+            mock_response.raise_for_status = Mock()
+            mock_response.links = {}
+            mock_responses.append(mock_response)
+        
+        mock_get.side_effect = mock_responses
         
         main.get_workflow_runs("testowner", "testrepo", "testtoken", days=7, verify_ssl=False)
         
-        assert mock_get.call_args[1]["verify"] is False
+        # Check that verify=False is passed in all calls
+        for call in mock_get.call_args_list:
+            assert call[1]["verify"] is False
     
     @patch('main.requests.get')
-    def test_get_workflow_runs_verify_ssl_ca_bundle(self, mock_get):
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_verify_ssl_ca_bundle(self, mock_sleep, mock_get):
         """Test that verify_ssl with CA bundle path is passed to requests."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
-        }
-        mock_response.json.return_value = {"workflow_runs": []}
-        mock_response.raise_for_status = Mock()
-        mock_get.return_value = mock_response
+        # Create empty responses for 7 days
+        mock_responses = []
+        for _ in range(7):
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.headers = {
+                "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Remaining": "4999",
+                "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+            }
+            mock_response.json.return_value = {"workflow_runs": []}
+            mock_response.raise_for_status = Mock()
+            mock_response.links = {}
+            mock_responses.append(mock_response)
+        
+        mock_get.side_effect = mock_responses
         
         ca_bundle_path = "/path/to/ca-bundle.crt"
         main.get_workflow_runs("testowner", "testrepo", "testtoken", days=7, verify_ssl=ca_bundle_path)
         
-        assert mock_get.call_args[1]["verify"] == ca_bundle_path
+        # Check that CA bundle path is passed in all calls
+        for call in mock_get.call_args_list:
+            assert call[1]["verify"] == ca_bundle_path
     
     @patch('main.requests.get')
     def test_get_workflow_runs_ssl_error(self, mock_get, capsys):
@@ -429,27 +502,48 @@ class TestGetWorkflowRuns:
         now = datetime.now(timezone.utc)
         reset_time = int((now + timedelta(seconds=5)).timestamp())
         
-        # First call: rate limit error (403)
-        mock_response_403 = Mock()
-        mock_response_403.status_code = 403
-        mock_response_403.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "0",
-            "X-RateLimit-Reset": str(reset_time)
-        }
+        # Create responses for 14 days
+        # First day will have rate limit error, then success
+        mock_responses = []
+        for day_offset in range(14):
+            if day_offset == 0:
+                # First call: rate limit error (403)
+                mock_response_403 = Mock()
+                mock_response_403.status_code = 403
+                mock_response_403.headers = {
+                    "X-RateLimit-Limit": "5000",
+                    "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Reset": str(reset_time)
+                }
+                mock_responses.append(mock_response_403)
+                
+                # Second call: success after waiting
+                mock_response_success = Mock()
+                mock_response_success.status_code = 200
+                mock_response_success.headers = {
+                    "X-RateLimit-Limit": "5000",
+                    "X-RateLimit-Remaining": "4999",
+                    "X-RateLimit-Reset": str(reset_time)
+                }
+                mock_response_success.json.return_value = {"workflow_runs": []}
+                mock_response_success.raise_for_status = Mock()
+                mock_response_success.links = {}
+                mock_responses.append(mock_response_success)
+            else:
+                # Empty responses for other days
+                mock_response = Mock()
+                mock_response.status_code = 200
+                mock_response.headers = {
+                    "X-RateLimit-Limit": "5000",
+                    "X-RateLimit-Remaining": str(5000 - day_offset),
+                    "X-RateLimit-Reset": str(reset_time)
+                }
+                mock_response.json.return_value = {"workflow_runs": []}
+                mock_response.raise_for_status = Mock()
+                mock_response.links = {}
+                mock_responses.append(mock_response)
         
-        # Second call: success after waiting
-        mock_response_success = Mock()
-        mock_response_success.status_code = 200
-        mock_response_success.headers = {
-            "X-RateLimit-Limit": "5000",
-            "X-RateLimit-Remaining": "4999",
-            "X-RateLimit-Reset": str(reset_time)
-        }
-        mock_response_success.json.return_value = {"workflow_runs": []}
-        mock_response_success.raise_for_status = Mock()
-        
-        mock_get.side_effect = [mock_response_403, mock_response_success]
+        mock_get.side_effect = mock_responses
         
         runs = main.get_workflow_runs("owner", "repo", "token", days=14)
         
