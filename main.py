@@ -147,17 +147,22 @@ def extract_workflow_details(runs: List[Dict]) -> List[Dict]:
     return details
 
 
-def save_to_csv(details: List[Dict], filename: str = "workflow_runs.csv"):
+def save_to_csv(details: List[Dict], filepath: str = "workflow_runs.csv"):
     """
     Save workflow run details to a CSV file.
     
     Args:
         details: List of dictionaries with workflow run details
-        filename: Output CSV filename
+        filepath: Full path to output CSV file (including directory)
     """
     if not details:
         print("No workflow runs to save.")
         return
+    
+    # Create directory if it doesn't exist
+    directory = os.path.dirname(filepath)
+    if directory and not os.path.exists(directory):
+        os.makedirs(directory, exist_ok=True)
     
     fieldnames = [
         "workflow_name",
@@ -177,12 +182,12 @@ def save_to_csv(details: List[Dict], filename: str = "workflow_runs.csv"):
         "workflow_url"
     ]
     
-    with open(filename, "w", newline="", encoding="utf-8") as csvfile:
+    with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(details)
     
-    print(f"Saved {len(details)} workflow runs to {filename}")
+    print(f"Saved {len(details)} workflow runs to {filepath}")
 
 
 def main():
@@ -214,10 +219,17 @@ def main():
         help="Number of days to look back (default: 14 for 2 weeks)"
     )
     parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./output",
+        help="Output directory for CSV file (default: ./output)"
+    )
+    parser.add_argument(
         "--output",
         type=str,
-        default="workflow_runs.csv",
-        help="Output CSV filename (default: workflow_runs.csv)"
+        default=None,
+        help="Output CSV filename (default: <owner>_<repo>_runs.csv). "
+             "If a full path is provided, it overrides --output-dir"
     )
     parser.add_argument(
         "--no-ssl-verify",
@@ -268,6 +280,21 @@ def main():
         print("You can create a token at: https://github.com/settings/tokens", file=sys.stderr)
         sys.exit(1)
     
+    # Determine output file path
+    if args.output is None:
+        # Use default filename in output directory
+        output_filename = f"{args.owner}_{args.repo}_runs.csv"
+        output_path = os.path.join(args.output_dir, output_filename)
+    elif os.path.isabs(args.output):
+        # User provided an absolute path, use it as-is
+        output_path = args.output
+    elif os.path.dirname(args.output):
+        # User provided a relative path with directory component, use it as-is
+        output_path = args.output
+    else:
+        # User provided just a filename, use it in the output directory
+        output_path = os.path.join(args.output_dir, args.output)
+    
     # Fetch workflow runs
     runs = get_workflow_runs(args.owner, args.repo, args.token, args.days, verify_ssl=verify_ssl)
     
@@ -275,7 +302,7 @@ def main():
     details = extract_workflow_details(runs)
     
     # Save to CSV
-    save_to_csv(details, args.output)
+    save_to_csv(details, output_path)
 
 
 if __name__ == "__main__":

@@ -35,8 +35,18 @@ python main.py
 # Look back 7 days instead of 14
 python main.py --owner <owner> --repo <repo> --token <token> --days 7
 
-# Custom output filename
+# Custom output filename (saved to ./output directory by default)
 python main.py --owner <owner> --repo <repo> --token <token> --output my_workflows.csv
+
+# Custom output directory
+python main.py --owner <owner> --repo <repo> --token <token> --output-dir ./my_reports
+
+# Custom output directory and filename
+python main.py --owner <owner> --repo <repo> --token <token> --output-dir ./reports --output custom.csv
+
+# Absolute or relative path (overrides --output-dir)
+python main.py --owner <owner> --repo <repo> --token <token> --output /absolute/path/to/file.csv
+python main.py --owner <owner> --repo <repo> --token <token> --output subdir/file.csv
 
 # Behind corporate VPN/proxy with SSL issues
 # Option 1: Disable SSL verification (NOT RECOMMENDED, use only if necessary)
@@ -48,7 +58,14 @@ python main.py --owner <owner> --repo <repo> --token <token> --ca-bundle /path/t
 
 ### Output
 
-The script generates a CSV file (`workflow_runs.csv` by default) with the following columns:
+The script generates a CSV file in the `./output` directory by default. The default filename is `<owner>_<repo>_runs.csv` (e.g., `octocat_hello-world_runs.csv`). The output directory is created automatically if it doesn't exist.
+
+**Output file location:**
+- Default: `./output/<owner>_<repo>_runs.csv`
+- Use `--output-dir` to change the output directory
+- Use `--output` to specify a custom filename (or full path to override directory)
+
+The CSV file contains the following columns:
 - `workflow_name`: Name of the workflow
 - `workflow_id`: Workflow ID
 - `run_id`: Unique run ID

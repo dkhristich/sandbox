@@ -422,7 +422,9 @@ class TestMain:
         
         mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 14, verify_ssl=True)
         mock_extract.assert_called_once()
-        mock_save.assert_called_once()
+        # Default output goes to ./output directory
+        expected_path = os.path.join("./output", "testowner_testrepo_runs.csv")
+        mock_save.assert_called_once_with([{"workflow_name": "CI"}], expected_path)
     
     @patch('main.get_workflow_runs')
     @patch('main.extract_workflow_details')
@@ -444,7 +446,9 @@ class TestMain:
             main.main()
         
         mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 7, verify_ssl=True)
-        mock_save.assert_called_once_with([], "custom.csv")
+        # Custom filename goes to default output directory
+        expected_path = os.path.join("./output", "custom.csv")
+        mock_save.assert_called_once_with([], expected_path)
     
     def test_main_missing_owner(self, capsys):
         """Test main with missing owner argument."""
@@ -505,6 +509,9 @@ class TestMain:
             main.main()
         
         mock_get_runs.assert_called_once_with("envowner", "envrepo", "envtoken", 14, verify_ssl=True)
+        # Default output goes to ./output directory
+        expected_path = os.path.join("./output", "envowner_envrepo_runs.csv")
+        mock_save.assert_called_once_with([], expected_path)
     
     @patch('main.get_workflow_runs')
     @patch('main.extract_workflow_details')
@@ -570,6 +577,113 @@ class TestMain:
         
         captured = capsys.readouterr()
         assert "Cannot use both --no-ssl-verify and --ca-bundle" in captured.err
+    
+    @patch('main.get_workflow_runs')
+    @patch('main.extract_workflow_details')
+    @patch('main.save_to_csv')
+    def test_main_custom_output_dir(self, mock_save, mock_extract, mock_get_runs):
+        """Test main with custom output directory."""
+        mock_get_runs.return_value = []
+        mock_extract.return_value = []
+        
+        test_args = [
+            "--owner", "testowner",
+            "--repo", "testrepo",
+            "--token", "testtoken",
+            "--output-dir", "custom_output"
+        ]
+        
+        with patch.object(sys, 'argv', ['main.py'] + test_args):
+            main.main()
+        
+        expected_path = os.path.join("custom_output", "testowner_testrepo_runs.csv")
+        mock_save.assert_called_once_with([], expected_path)
+    
+    @patch('main.get_workflow_runs')
+    @patch('main.extract_workflow_details')
+    @patch('main.save_to_csv')
+    def test_main_absolute_output_path(self, mock_save, mock_extract, mock_get_runs):
+        """Test that absolute output path overrides output directory."""
+        mock_get_runs.return_value = []
+        mock_extract.return_value = []
+        
+        test_args = [
+            "--owner", "testowner",
+            "--repo", "testrepo",
+            "--token", "testtoken",
+            "--output", "/absolute/path/to/file.csv"
+        ]
+        
+        with patch.object(sys, 'argv', ['main.py'] + test_args):
+            main.main()
+        
+        # Absolute path should be used as-is, ignoring output-dir
+        mock_save.assert_called_once_with([], "/absolute/path/to/file.csv")
+    
+    @patch('main.get_workflow_runs')
+    @patch('main.extract_workflow_details')
+    @patch('main.save_to_csv')
+    def test_main_relative_output_path(self, mock_save, mock_extract, mock_get_runs):
+        """Test that relative output path with directory overrides output directory."""
+        mock_get_runs.return_value = []
+        mock_extract.return_value = []
+        
+        test_args = [
+            "--owner", "testowner",
+            "--repo", "testrepo",
+            "--token", "testtoken",
+            "--output", "subdir/file.csv"
+        ]
+        
+        with patch.object(sys, 'argv', ['main.py'] + test_args):
+            main.main()
+        
+        # Relative path with directory should be used as-is
+        mock_save.assert_called_once_with([], "subdir/file.csv")
+    
+    def test_save_to_csv_creates_directory(self):
+        """Test that save_to_csv creates the output directory if it doesn't exist."""
+        details = [
+            {
+                "workflow_name": "CI",
+                "workflow_id": 123,
+                "run_id": 456,
+                "run_number": 1,
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": "2024-01-15T10:00:00Z",
+                "updated_at": "2024-01-15T10:05:00Z",
+                "run_started_at": "2024-01-15T10:01:00Z",
+                "actor": "testuser",
+                "branch": "main",
+                "commit_sha": "abcdef12",
+                "commit_message": "Test commit",
+                "event": "push",
+                "workflow_url": "https://github.com/owner/repo/actions/runs/456"
+            }
+        ]
+        
+        # Use a temporary directory that doesn't exist
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output_dir = os.path.join(tmpdir, "nonexistent", "subdir")
+            output_file = os.path.join(output_dir, "test.csv")
+            
+            # Directory shouldn't exist yet
+            assert not os.path.exists(output_dir)
+            
+            # Save should create the directory
+            main.save_to_csv(details, output_file)
+            
+            # Directory should now exist
+            assert os.path.exists(output_dir)
+            assert os.path.exists(output_file)
+            
+            # Verify file content
+            with open(output_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+                assert len(rows) == 1
+                assert rows[0]["workflow_name"] == "CI"
 
 
 if __name__ == "__main__":
