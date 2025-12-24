@@ -104,6 +104,23 @@ If you encounter SSL certificate verification errors (common when behind corpora
    python main.py --owner <owner> --repo <repo> --token <token>
    ```
 
+### Rate Limit Handling
+
+The script automatically handles GitHub API rate limits:
+
+- **Automatic monitoring**: The script checks rate limit headers on every API response and warns you when you're running low (below 20% remaining)
+- **Automatic retry**: If you hit the rate limit (HTTP 403), the script will:
+  - Detect the rate limit reset time from the API response
+  - Automatically wait until the rate limit resets
+  - Retry the request automatically
+  - Show progress during long waits
+
+**Rate limits:**
+- Authenticated requests: 5,000 requests per hour
+- Unauthenticated requests: 60 requests per hour
+
+The script uses a small delay (0.1 seconds) between requests to avoid hitting rate limits too quickly. If you do hit the rate limit, the script will wait and retry automatically - you don't need to do anything.
+
 ### Testing
 
 Run the test suite with pytest:

@@ -7,10 +7,103 @@ import os
 import sys
 import csv
 import requests
+import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Optional, Union
 import argparse
 import warnings
+
+
+def check_rate_limit(response: requests.Response) -> None:
+    """
+    Check and display rate limit information from GitHub API response headers.
+    
+    Args:
+        response: Response object from GitHub API
+    """
+    try:
+        rate_limit = response.headers.get("X-RateLimit-Limit")
+        rate_remaining = response.headers.get("X-RateLimit-Remaining")
+        rate_reset = response.headers.get("X-RateLimit-Reset")
+    except (AttributeError, TypeError):
+        # Headers might not be available (e.g., in tests with incomplete mocks)
+        return
+    
+    if rate_limit and rate_remaining:
+        try:
+            remaining = int(rate_remaining)
+            limit = int(rate_limit)
+        except (ValueError, TypeError):
+            # Headers might not be valid integers (e.g., Mock objects in tests)
+            return
+        percentage = (remaining / limit) * 100
+        
+        # Warn if we're running low on rate limit
+        if percentage < 20:
+            print(f"⚠️  Rate limit warning: {remaining}/{limit} requests remaining ({percentage:.1f}%)", file=sys.stderr)
+        
+        # Show rate limit info every 10 pages or when low
+        if remaining < 100 or (int(rate_remaining) % 100 == 0 and remaining < limit):
+            reset_time = None
+            if rate_reset:
+                try:
+                    reset_timestamp = int(rate_reset)
+                    reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+                    reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+                    print(f"Rate limit: {remaining}/{limit} remaining (resets at {reset_str})")
+                except (ValueError, OSError):
+                    pass
+
+
+def handle_rate_limit_error(response: requests.Response, max_retries: int = 3) -> bool:
+    """
+    Handle rate limit errors (HTTP 403) by waiting for the rate limit to reset.
+    
+    Args:
+        response: Response object from GitHub API with 403 status
+        max_retries: Maximum number of retries (default: 3)
+    
+    Returns:
+        True if we should retry, False otherwise
+    """
+    if response.status_code != 403:
+        return False
+    
+    rate_reset = response.headers.get("X-RateLimit-Reset")
+    if not rate_reset:
+        print("Rate limit exceeded, but reset time not available. Waiting 60 seconds...", file=sys.stderr)
+        time.sleep(60)
+        return True
+    
+    try:
+        reset_timestamp = int(rate_reset)
+        reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+        now = datetime.now(timezone.utc)
+        wait_seconds = max(0, int((reset_timestamp - now.timestamp())) + 1)
+        
+        if wait_seconds > 0:
+            reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+            print(f"\n⏳ Rate limit exceeded. Waiting until {reset_str} ({wait_seconds} seconds)...", file=sys.stderr)
+            
+            # Show progress for long waits
+            if wait_seconds > 60:
+                while wait_seconds > 0:
+                    mins, secs = divmod(wait_seconds, 60)
+                    if wait_seconds % 60 == 0 or wait_seconds == 1:
+                        print(f"   Waiting... {mins}m {secs}s remaining", file=sys.stderr)
+                    time.sleep(min(60, wait_seconds))
+                    wait_seconds = max(0, wait_seconds - 60)
+            else:
+                time.sleep(wait_seconds)
+            
+            print("✅ Rate limit reset. Retrying...", file=sys.stderr)
+            return True
+    except (ValueError, OSError) as e:
+        print(f"Error parsing rate limit reset time: {e}. Waiting 60 seconds...", file=sys.stderr)
+        time.sleep(60)
+        return True
+    
+    return False
 
 
 def get_workflow_runs(
@@ -48,6 +141,8 @@ def get_workflow_runs(
     
     all_runs = []
     page = 1
+    retry_count = 0
+    max_retries = 3
     
     print(f"Fetching workflow runs from the last {days} days (since {cutoff_date.date()})...")
     
@@ -60,7 +155,27 @@ def get_workflow_runs(
         
         try:
             response = requests.get(base_url, headers=headers, params=params, verify=verify_ssl)
+            
+            # Check rate limit status
+            check_rate_limit(response)
+            
+            # Handle rate limit errors (403)
+            if response.status_code == 403:
+                if handle_rate_limit_error(response, max_retries):
+                    retry_count += 1
+                    if retry_count > max_retries:
+                        print("Max retries exceeded for rate limit. Exiting.", file=sys.stderr)
+                        sys.exit(1)
+                    # Retry the same page
+                    continue
+                else:
+                    print("Rate limit error could not be resolved. Exiting.", file=sys.stderr)
+                    sys.exit(1)
+            
+            # Raise for other HTTP errors
             response.raise_for_status()
+            retry_count = 0  # Reset retry count on success
+            
             data = response.json()
             
             runs = data.get("workflow_runs", [])
@@ -94,6 +209,9 @@ def get_workflow_runs(
             page += 1
             print(f"Fetched page {page - 1}, total runs so far: {len(all_runs)}")
             
+            # Small delay to avoid hitting rate limits too quickly
+            time.sleep(0.1)
+            
         except requests.exceptions.SSLError as e:
             print(f"SSL Error: {e}", file=sys.stderr)
             print("\nIf you're behind a corporate VPN/proxy, try one of these options:", file=sys.stderr)
@@ -101,6 +219,22 @@ def get_workflow_runs(
             print("  2. Use --ca-bundle <path> to specify your corporate CA certificate", file=sys.stderr)
             print("  3. Export REQUESTS_CA_BUNDLE environment variable pointing to your CA bundle", file=sys.stderr)
             sys.exit(1)
+        except requests.exceptions.HTTPError as e:
+            # Handle other HTTP errors (not rate limit)
+            if e.response and e.response.status_code == 403:
+                # This should have been handled above, but just in case
+                if not handle_rate_limit_error(e.response, max_retries):
+                    print(f"HTTP Error {e.response.status_code}: {e}", file=sys.stderr)
+                    if hasattr(e.response, 'text'):
+                        print(f"Response: {e.response.text}", file=sys.stderr)
+                    sys.exit(1)
+                continue
+            else:
+                print(f"HTTP Error: {e}", file=sys.stderr)
+                if hasattr(e, 'response') and e.response is not None:
+                    if hasattr(e.response, 'text'):
+                        print(f"Response: {e.response.text}", file=sys.stderr)
+                sys.exit(1)
         except requests.exceptions.RequestException as e:
             print(f"Error fetching workflow runs: {e}", file=sys.stderr)
             if hasattr(e, 'response') and e.response is not None:
@@ -110,6 +244,51 @@ def get_workflow_runs(
     
     print(f"Total workflow runs found: {len(all_runs)}")
     return all_runs
+
+
+def filter_latest_runs_per_workflow(runs: List[Dict]) -> List[Dict]:
+    """
+    Filter runs to keep only the most recent run for each workflow.
+    
+    Args:
+        runs: List of workflow run dictionaries from GitHub API
+    
+    Returns:
+        List of dictionaries containing only the latest run for each workflow_id
+    """
+    if not runs:
+        return []
+    
+    # Group runs by workflow_id
+    workflows = {}
+    for run in runs:
+        workflow_id = run.get("workflow_id")
+        if workflow_id is None:
+            continue
+        
+        created_at_str = run.get("created_at")
+        if not created_at_str:
+            continue
+        
+        # Parse created_at timestamp
+        try:
+            created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            continue
+        
+        # Keep the run with the most recent created_at for each workflow_id
+        if workflow_id not in workflows:
+            workflows[workflow_id] = run
+        else:
+            existing_created_at = datetime.fromisoformat(
+                workflows[workflow_id]["created_at"].replace("Z", "+00:00")
+            )
+            if created_at > existing_created_at:
+                workflows[workflow_id] = run
+    
+    latest_runs = list(workflows.values())
+    print(f"Filtered to {len(latest_runs)} latest runs (one per workflow)")
+    return latest_runs
 
 
 def extract_workflow_details(runs: List[Dict]) -> List[Dict]:
@@ -297,6 +476,9 @@ def main():
     
     # Fetch workflow runs
     runs = get_workflow_runs(args.owner, args.repo, args.token, args.days, verify_ssl=verify_ssl)
+    
+    # Filter to keep only the latest run for each workflow
+    runs = filter_latest_runs_per_workflow(runs)
     
     # Extract details
     details = extract_workflow_details(runs)

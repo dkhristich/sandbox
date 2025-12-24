@@ -241,6 +241,12 @@ class TestGetWorkflowRuns:
         """Test fetching workflow runs from a single page."""
         # Mock response
         mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
         mock_response.json.return_value = {
             "workflow_runs": [
                 {
@@ -267,6 +273,12 @@ class TestGetWorkflowRuns:
         
         # First page response
         mock_response_page1 = Mock()
+        mock_response_page1.status_code = 200
+        mock_response_page1.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4998",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
         mock_response_page1.json.return_value = {
             "workflow_runs": [
                 {
@@ -282,6 +294,12 @@ class TestGetWorkflowRuns:
         
         # Second page response (empty)
         mock_response_page2 = Mock()
+        mock_response_page2.status_code = 200
+        mock_response_page2.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4997",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
         mock_response_page2.json.return_value = {
             "workflow_runs": []
         }
@@ -300,6 +318,12 @@ class TestGetWorkflowRuns:
         now = datetime.now(timezone.utc)
         
         mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
         mock_response.json.return_value = {
             "workflow_runs": [
                 {
@@ -329,7 +353,13 @@ class TestGetWorkflowRuns:
     def test_get_workflow_runs_api_error(self, mock_get):
         """Test handling of API errors."""
         mock_response = Mock()
-        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("404 Not Found")
+        mock_response.status_code = 404
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
+        mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("404 Not Found", response=mock_response)
         mock_response.text = "Not Found"
         mock_get.return_value = mock_response
         
@@ -340,6 +370,12 @@ class TestGetWorkflowRuns:
     def test_get_workflow_runs_correct_url_and_headers(self, mock_get):
         """Test that the correct URL and headers are used."""
         mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
         mock_response.json.return_value = {"workflow_runs": []}
         mock_response.raise_for_status = Mock()
         mock_get.return_value = mock_response
@@ -362,6 +398,12 @@ class TestGetWorkflowRuns:
     def test_get_workflow_runs_verify_ssl_false(self, mock_get):
         """Test that verify_ssl=False is passed to requests."""
         mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
         mock_response.json.return_value = {"workflow_runs": []}
         mock_response.raise_for_status = Mock()
         mock_get.return_value = mock_response
@@ -374,6 +416,12 @@ class TestGetWorkflowRuns:
     def test_get_workflow_runs_verify_ssl_ca_bundle(self, mock_get):
         """Test that verify_ssl with CA bundle path is passed to requests."""
         mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
         mock_response.json.return_value = {"workflow_runs": []}
         mock_response.raise_for_status = Mock()
         mock_get.return_value = mock_response
@@ -398,6 +446,258 @@ class TestGetWorkflowRuns:
         captured = capsys.readouterr()
         assert "SSL Error" in captured.err
         assert "--no-ssl-verify" in captured.err or "--ca-bundle" in captured.err
+    
+    @patch('main.requests.get')
+    @patch('main.time.sleep')
+    def test_get_workflow_runs_rate_limit_handling(self, mock_sleep, mock_get):
+        """Test that rate limit errors are handled with retry."""
+        now = datetime.now(timezone.utc)
+        reset_time = int((now + timedelta(seconds=5)).timestamp())
+        
+        # First call: rate limit error (403)
+        mock_response_403 = Mock()
+        mock_response_403.status_code = 403
+        mock_response_403.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "0",
+            "X-RateLimit-Reset": str(reset_time)
+        }
+        
+        # Second call: success after waiting
+        mock_response_success = Mock()
+        mock_response_success.status_code = 200
+        mock_response_success.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4999",
+            "X-RateLimit-Reset": str(reset_time)
+        }
+        mock_response_success.json.return_value = {"workflow_runs": []}
+        mock_response_success.raise_for_status = Mock()
+        
+        mock_get.side_effect = [mock_response_403, mock_response_success]
+        
+        runs = main.get_workflow_runs("owner", "repo", "token", days=14)
+        
+        # Should have retried and succeeded
+        assert len(runs) == 0
+        # Should have called sleep to wait for rate limit reset
+        assert mock_sleep.called
+
+
+class TestRateLimitHandling:
+    """Tests for rate limit handling functions."""
+    
+    def test_check_rate_limit_normal(self, capsys):
+        """Test rate limit checking with normal remaining requests."""
+        mock_response = Mock()
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "4500",
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
+        
+        main.check_rate_limit(mock_response)
+        
+        captured = capsys.readouterr()
+        # Should not print warning for normal usage
+        assert "Rate limit warning" not in captured.err
+    
+    def test_check_rate_limit_low(self, capsys):
+        """Test rate limit checking when remaining is low."""
+        mock_response = Mock()
+        mock_response.headers = {
+            "X-RateLimit-Limit": "5000",
+            "X-RateLimit-Remaining": "500",  # 10%
+            "X-RateLimit-Reset": str(int(datetime.now(timezone.utc).timestamp()) + 3600)
+        }
+        
+        main.check_rate_limit(mock_response)
+        
+        captured = capsys.readouterr()
+        assert "Rate limit warning" in captured.err
+    
+    def test_handle_rate_limit_error_with_reset_time(self):
+        """Test handling rate limit error with reset time."""
+        reset_timestamp = int(datetime.now(timezone.utc).timestamp()) + 10
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {
+            "X-RateLimit-Reset": str(reset_timestamp)
+        }
+        
+        with patch('main.time.sleep') as mock_sleep:
+            result = main.handle_rate_limit_error(mock_response)
+        
+        assert result is True
+        # Should have slept
+        assert mock_sleep.called
+    
+    def test_handle_rate_limit_error_no_reset_time(self):
+        """Test handling rate limit error without reset time."""
+        mock_response = Mock()
+        mock_response.status_code = 403
+        mock_response.headers = {}
+        
+        with patch('main.time.sleep') as mock_sleep:
+            result = main.handle_rate_limit_error(mock_response)
+        
+        assert result is True
+        # Should have slept for default 60 seconds
+        mock_sleep.assert_called_with(60)
+    
+    def test_handle_rate_limit_error_not_403(self):
+        """Test that non-403 errors return False."""
+        mock_response = Mock()
+        mock_response.status_code = 404
+        
+        result = main.handle_rate_limit_error(mock_response)
+        
+        assert result is False
+
+
+class TestFilterLatestRunsPerWorkflow:
+    """Tests for filter_latest_runs_per_workflow function."""
+    
+    def test_filter_latest_runs_single_workflow(self):
+        """Test filtering when there are multiple runs of the same workflow."""
+        now = datetime.now(timezone.utc)
+        runs = [
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 1,
+                "created_at": (now - timedelta(days=5)).isoformat().replace("+00:00", "Z"),
+            },
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 2,
+                "created_at": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+            },
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 3,
+                "created_at": (now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            }
+        ]
+        
+        filtered = main.filter_latest_runs_per_workflow(runs)
+        
+        assert len(filtered) == 1
+        assert filtered[0]["id"] == 3  # Most recent run
+    
+    def test_filter_latest_runs_multiple_workflows(self):
+        """Test filtering with multiple different workflows."""
+        now = datetime.now(timezone.utc)
+        runs = [
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 1,
+                "created_at": (now - timedelta(days=5)).isoformat().replace("+00:00", "Z"),
+            },
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 2,
+                "created_at": (now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            },
+            {
+                "workflow_id": 456,
+                "name": "Deploy",
+                "id": 3,
+                "created_at": (now - timedelta(days=3)).isoformat().replace("+00:00", "Z"),
+            },
+            {
+                "workflow_id": 456,
+                "name": "Deploy",
+                "id": 4,
+                "created_at": (now - timedelta(days=2)).isoformat().replace("+00:00", "Z"),
+            }
+        ]
+        
+        filtered = main.filter_latest_runs_per_workflow(runs)
+        
+        assert len(filtered) == 2
+        # Should have one run for each workflow_id
+        workflow_ids = {run["workflow_id"] for run in filtered}
+        assert workflow_ids == {123, 456}
+        # Verify it's the latest run for each
+        for run in filtered:
+            if run["workflow_id"] == 123:
+                assert run["id"] == 2
+            elif run["workflow_id"] == 456:
+                assert run["id"] == 4
+    
+    def test_filter_latest_runs_empty_list(self):
+        """Test filtering an empty list."""
+        filtered = main.filter_latest_runs_per_workflow([])
+        assert filtered == []
+    
+    def test_filter_latest_runs_single_run(self):
+        """Test filtering when there's only one run."""
+        now = datetime.now(timezone.utc)
+        runs = [
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 1,
+                "created_at": (now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            }
+        ]
+        
+        filtered = main.filter_latest_runs_per_workflow(runs)
+        
+        assert len(filtered) == 1
+        assert filtered[0]["id"] == 1
+    
+    def test_filter_latest_runs_missing_workflow_id(self):
+        """Test that runs without workflow_id are skipped."""
+        now = datetime.now(timezone.utc)
+        runs = [
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 1,
+                "created_at": (now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            },
+            {
+                # Missing workflow_id
+                "name": "CI",
+                "id": 2,
+                "created_at": (now - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            }
+        ]
+        
+        filtered = main.filter_latest_runs_per_workflow(runs)
+        
+        # Should only include the run with workflow_id
+        assert len(filtered) == 1
+        assert filtered[0]["id"] == 1
+    
+    def test_filter_latest_runs_missing_created_at(self):
+        """Test that runs without created_at are skipped."""
+        runs = [
+            {
+                "workflow_id": 123,
+                "name": "CI",
+                "id": 1,
+                "created_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z"),
+            },
+            {
+                "workflow_id": 456,
+                "name": "Deploy",
+                "id": 2,
+                # Missing created_at
+            }
+        ]
+        
+        filtered = main.filter_latest_runs_per_workflow(runs)
+        
+        # Should only include the run with created_at
+        assert len(filtered) == 1
+        assert filtered[0]["id"] == 1
 
 
 class TestMain:
