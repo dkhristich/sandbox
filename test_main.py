@@ -354,6 +354,50 @@ class TestGetWorkflowRuns:
         headers = mock_get.call_args[1]["headers"]
         assert headers["Authorization"] == "token testtoken"
         assert headers["Accept"] == "application/vnd.github.v3+json"
+        
+        # Verify SSL verification is enabled by default
+        assert mock_get.call_args[1]["verify"] is True
+    
+    @patch('main.requests.get')
+    def test_get_workflow_runs_verify_ssl_false(self, mock_get):
+        """Test that verify_ssl=False is passed to requests."""
+        mock_response = Mock()
+        mock_response.json.return_value = {"workflow_runs": []}
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+        
+        main.get_workflow_runs("testowner", "testrepo", "testtoken", days=7, verify_ssl=False)
+        
+        assert mock_get.call_args[1]["verify"] is False
+    
+    @patch('main.requests.get')
+    def test_get_workflow_runs_verify_ssl_ca_bundle(self, mock_get):
+        """Test that verify_ssl with CA bundle path is passed to requests."""
+        mock_response = Mock()
+        mock_response.json.return_value = {"workflow_runs": []}
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+        
+        ca_bundle_path = "/path/to/ca-bundle.crt"
+        main.get_workflow_runs("testowner", "testrepo", "testtoken", days=7, verify_ssl=ca_bundle_path)
+        
+        assert mock_get.call_args[1]["verify"] == ca_bundle_path
+    
+    @patch('main.requests.get')
+    def test_get_workflow_runs_ssl_error(self, mock_get, capsys):
+        """Test handling of SSL errors with helpful error message."""
+        mock_get.side_effect = requests.exceptions.SSLError("certificate verify failed")
+        
+        with pytest.raises(SystemExit) as exc_info:
+            main.get_workflow_runs("owner", "repo", "token", days=14)
+        
+        # The function should exit with code 1
+        assert exc_info.value.code == 1
+        
+        # Check that helpful error message is printed
+        captured = capsys.readouterr()
+        assert "SSL Error" in captured.err
+        assert "--no-ssl-verify" in captured.err or "--ca-bundle" in captured.err
 
 
 class TestMain:
@@ -376,7 +420,7 @@ class TestMain:
         with patch.object(sys, 'argv', ['main.py'] + test_args):
             main.main()
         
-        mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 14)
+        mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 14, verify_ssl=True)
         mock_extract.assert_called_once()
         mock_save.assert_called_once()
     
@@ -399,7 +443,7 @@ class TestMain:
         with patch.object(sys, 'argv', ['main.py'] + test_args):
             main.main()
         
-        mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 7)
+        mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 7, verify_ssl=True)
         mock_save.assert_called_once_with([], "custom.csv")
     
     def test_main_missing_owner(self, capsys):
@@ -460,7 +504,72 @@ class TestMain:
         with patch.object(sys, 'argv', ['main.py']):
             main.main()
         
-        mock_get_runs.assert_called_once_with("envowner", "envrepo", "envtoken", 14)
+        mock_get_runs.assert_called_once_with("envowner", "envrepo", "envtoken", 14, verify_ssl=True)
+    
+    @patch('main.get_workflow_runs')
+    @patch('main.extract_workflow_details')
+    @patch('main.save_to_csv')
+    def test_main_no_ssl_verify(self, mock_save, mock_extract, mock_get_runs):
+        """Test main with --no-ssl-verify flag."""
+        mock_get_runs.return_value = []
+        mock_extract.return_value = []
+        
+        test_args = [
+            "--owner", "testowner",
+            "--repo", "testrepo",
+            "--token", "testtoken",
+            "--no-ssl-verify"
+        ]
+        
+        with patch.object(sys, 'argv', ['main.py'] + test_args):
+            main.main()
+        
+        mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 14, verify_ssl=False)
+    
+    @patch('main.get_workflow_runs')
+    @patch('main.extract_workflow_details')
+    @patch('main.save_to_csv')
+    def test_main_ca_bundle(self, mock_save, mock_extract, mock_get_runs):
+        """Test main with --ca-bundle flag."""
+        mock_get_runs.return_value = []
+        mock_extract.return_value = []
+        
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.crt') as f:
+            ca_bundle_path = f.name
+            f.write("fake CA certificate")
+        
+        try:
+            test_args = [
+                "--owner", "testowner",
+                "--repo", "testrepo",
+                "--token", "testtoken",
+                "--ca-bundle", ca_bundle_path
+            ]
+            
+            with patch.object(sys, 'argv', ['main.py'] + test_args):
+                main.main()
+            
+            mock_get_runs.assert_called_once_with("testowner", "testrepo", "testtoken", 14, verify_ssl=ca_bundle_path)
+        finally:
+            if os.path.exists(ca_bundle_path):
+                os.unlink(ca_bundle_path)
+    
+    def test_main_both_ssl_options_error(self, capsys):
+        """Test that using both --no-ssl-verify and --ca-bundle causes an error."""
+        test_args = [
+            "--owner", "testowner",
+            "--repo", "testrepo",
+            "--token", "testtoken",
+            "--no-ssl-verify",
+            "--ca-bundle", "/path/to/ca.crt"
+        ]
+        
+        with patch.object(sys, 'argv', ['main.py'] + test_args):
+            with pytest.raises(SystemExit):
+                main.main()
+        
+        captured = capsys.readouterr()
+        assert "Cannot use both --no-ssl-verify and --ca-bundle" in captured.err
 
 
 if __name__ == "__main__":
