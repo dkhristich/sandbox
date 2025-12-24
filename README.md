@@ -35,6 +35,10 @@ python main.py
 # Look back 7 days instead of 14
 python main.py --owner <owner> --repo <repo> --token <token> --days 7
 
+# For repositories with many workflow runs (>1000), use shorter date ranges
+# GitHub API limits results to ~1000 per query, so split into smaller periods:
+python main.py --owner <owner> --repo <repo> --token <token> --days 3  # Run multiple times with different date ranges
+
 # Custom output filename (saved to ./output directory by default)
 python main.py --owner <owner> --repo <repo> --token <token> --output my_workflows.csv
 

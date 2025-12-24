@@ -55,6 +55,43 @@ def check_rate_limit(response: requests.Response) -> None:
                     pass
 
 
+def print_final_rate_limit(response: requests.Response) -> None:
+    """
+    Print the final rate limit status at the end of execution.
+    
+    Args:
+        response: Last response object from GitHub API
+    """
+    try:
+        rate_limit = response.headers.get("X-RateLimit-Limit")
+        rate_remaining = response.headers.get("X-RateLimit-Remaining")
+        rate_reset = response.headers.get("X-RateLimit-Reset")
+    except (AttributeError, TypeError):
+        return
+    
+    if rate_limit and rate_remaining:
+        try:
+            remaining = int(rate_remaining)
+            limit = int(rate_limit)
+            used = limit - remaining
+            percentage = (remaining / limit) * 100
+        except (ValueError, TypeError):
+            return
+        
+        reset_str = "N/A"
+        if rate_reset:
+            try:
+                reset_timestamp = int(rate_reset)
+                reset_time = datetime.fromtimestamp(reset_timestamp, tz=timezone.utc)
+                reset_str = reset_time.strftime("%Y-%m-%d %H:%M:%S UTC")
+            except (ValueError, OSError):
+                pass
+        
+        print(f"\n📊 Final rate limit status: {remaining}/{limit} remaining ({used} used, {percentage:.1f}% remaining)")
+        if reset_str != "N/A":
+            print(f"   Rate limit resets at: {reset_str}")
+
+
 def handle_rate_limit_error(response: requests.Response, max_retries: int = 3) -> bool:
     """
     Handle rate limit errors (HTTP 403) by waiting for the rate limit to reset.
@@ -143,18 +180,26 @@ def get_workflow_runs(
     page = 1
     retry_count = 0
     max_retries = 3
+    next_url = None  # Will be set from Link header
+    last_response = None  # Store last successful response for final rate limit check
     
     print(f"Fetching workflow runs from the last {days} days (since {cutoff_date.date()})...")
     
     while True:
-        params = {
-            "per_page": per_page,
-            "page": page,
-            "created": f">={cutoff_iso}"
-        }
+        # Use next_url from Link header if available, otherwise construct URL with params
+        if next_url:
+            url = next_url
+            params = None  # URL already contains all params
+        else:
+            url = base_url
+            params = {
+                "per_page": per_page,
+                "page": page,
+                "created": f">={cutoff_iso}"
+            }
         
         try:
-            response = requests.get(base_url, headers=headers, params=params, verify=verify_ssl)
+            response = requests.get(url, headers=headers, params=params, verify=verify_ssl)
             
             # Check rate limit status
             check_rate_limit(response)
@@ -166,7 +211,7 @@ def get_workflow_runs(
                     if retry_count > max_retries:
                         print("Max retries exceeded for rate limit. Exiting.", file=sys.stderr)
                         sys.exit(1)
-                    # Retry the same page
+                    # Retry the same request
                     continue
                 else:
                     print("Rate limit error could not be resolved. Exiting.", file=sys.stderr)
@@ -175,6 +220,7 @@ def get_workflow_runs(
             # Raise for other HTTP errors
             response.raise_for_status()
             retry_count = 0  # Reset retry count on success
+            last_response = response  # Store last successful response
             
             data = response.json()
             
@@ -193,8 +239,40 @@ def get_workflow_runs(
             
             all_runs.extend(filtered_runs)
             
-            # If we got fewer results than per_page, we're on the last page
-            if len(runs) < per_page:
+            # Check for next page using Link header (GitHub's recommended pagination method)
+            next_url = None
+            # Try using response.links (requests library parses Link headers automatically)
+            if hasattr(response, 'links') and response.links:
+                next_link = response.links.get('next')
+                if next_link:
+                    next_url = next_link.get('url')
+            # Fallback: manually parse Link header if response.links is not available
+            elif 'Link' in response.headers:
+                import re
+                link_header = response.headers.get('Link', '')
+                # Parse Link header: <url>; rel="next"
+                next_match = re.search(r'<([^>]+)>;\s*rel="next"', link_header)
+                if next_match:
+                    next_url = next_match.group(1)
+            
+            # If no next link and we got fewer results than per_page, we're on the last page
+            if not next_url and len(runs) < per_page:
+                break
+            
+            # If no next link and we've hit exactly 1000 results, check if we need to continue
+            # GitHub API may limit results to 1000, but we should try to get more by narrowing date range
+            if not next_url and len(all_runs) >= 1000:
+                # Check if we've actually reached the cutoff date
+                if filtered_runs:
+                    oldest_run = min(
+                        datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+                        for r in filtered_runs
+                    )
+                    if oldest_run >= cutoff_date:
+                        # We hit 1000 results but haven't reached the cutoff date yet
+                        print(f"⚠️  Warning: Fetched {len(all_runs)} runs. "
+                              f"GitHub API may limit results to 1000 per query. "
+                              f"Consider using a shorter --days period to get all runs.", file=sys.stderr)
                 break
             
             # If the oldest run is before our cutoff, we can stop
@@ -206,7 +284,12 @@ def get_workflow_runs(
             if oldest_run and oldest_run < cutoff_date:
                 break
             
-            page += 1
+            # If no next URL, increment page number for fallback
+            if not next_url:
+                page += 1
+            else:
+                page += 1  # Keep track for logging
+            
             print(f"Fetched page {page - 1}, total runs so far: {len(all_runs)}")
             
             # Small delay to avoid hitting rate limits too quickly
@@ -243,6 +326,11 @@ def get_workflow_runs(
             sys.exit(1)
     
     print(f"Total workflow runs found: {len(all_runs)}")
+    
+    # Print final rate limit status
+    if last_response:
+        print_final_rate_limit(last_response)
+    
     return all_runs
 
 
@@ -304,22 +392,22 @@ def extract_workflow_details(runs: List[Dict]) -> List[Dict]:
     details = []
     
     for run in runs:
+        # Get workflow file path - it might be in 'path' field
+        workflow_file = run.get("path", "N/A")
+        if workflow_file == "N/A":
+            # Try alternative field names
+            workflow_file = run.get("workflow_file", run.get("workflow_path", "N/A"))
+        
         detail = {
             "workflow_name": run.get("name", "N/A"),
-            "workflow_id": run.get("workflow_id", "N/A"),
-            "run_id": run.get("id", "N/A"),
-            "run_number": run.get("run_number", "N/A"),
+            "workflow_file": workflow_file,
+            "workflow_url": run.get("html_url", "N/A"),
             "status": run.get("status", "N/A"),
             "conclusion": run.get("conclusion", "N/A"),
-            "created_at": run.get("created_at", "N/A"),
-            "updated_at": run.get("updated_at", "N/A"),
             "run_started_at": run.get("run_started_at", "N/A"),
-            "actor": run.get("actor", {}).get("login", "N/A") if run.get("actor") else "N/A",
             "branch": run.get("head_branch", "N/A"),
             "commit_sha": run.get("head_sha", "N/A")[:8] if run.get("head_sha") else "N/A",
-            "commit_message": run.get("head_commit", {}).get("message", "N/A").split("\n")[0] if run.get("head_commit", {}).get("message") else "N/A",
             "event": run.get("event", "N/A"),
-            "workflow_url": run.get("html_url", "N/A"),
         }
         details.append(detail)
     
@@ -345,20 +433,14 @@ def save_to_csv(details: List[Dict], filepath: str = "workflow_runs.csv"):
     
     fieldnames = [
         "workflow_name",
-        "workflow_id",
-        "run_id",
-        "run_number",
+        "workflow_file",
+        "workflow_url",
         "status",
         "conclusion",
-        "created_at",
-        "updated_at",
         "run_started_at",
-        "actor",
         "branch",
         "commit_sha",
-        "commit_message",
-        "event",
-        "workflow_url"
+        "event"
     ]
     
     with open(filepath, "w", newline="", encoding="utf-8") as csvfile:

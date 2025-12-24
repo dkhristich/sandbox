@@ -25,18 +25,12 @@ class TestExtractWorkflowDetails:
         runs = [
             {
                 "name": "CI",
-                "workflow_id": 123,
-                "id": 456,
-                "run_number": 1,
+                "path": ".github/workflows/ci.yml",
                 "status": "completed",
                 "conclusion": "success",
-                "created_at": "2024-01-15T10:00:00Z",
-                "updated_at": "2024-01-15T10:05:00Z",
                 "run_started_at": "2024-01-15T10:01:00Z",
-                "actor": {"login": "testuser"},
                 "head_branch": "main",
                 "head_sha": "abcdef1234567890",
-                "head_commit": {"message": "Test commit"},
                 "event": "push",
                 "html_url": "https://github.com/owner/repo/actions/runs/456"
             }
@@ -46,15 +40,13 @@ class TestExtractWorkflowDetails:
         
         assert len(details) == 1
         assert details[0]["workflow_name"] == "CI"
-        assert details[0]["workflow_id"] == 123
-        assert details[0]["run_id"] == 456
-        assert details[0]["run_number"] == 1
+        assert details[0]["workflow_file"] == ".github/workflows/ci.yml"
+        assert details[0]["workflow_url"] == "https://github.com/owner/repo/actions/runs/456"
         assert details[0]["status"] == "completed"
         assert details[0]["conclusion"] == "success"
-        assert details[0]["actor"] == "testuser"
+        assert details[0]["run_started_at"] == "2024-01-15T10:01:00Z"
         assert details[0]["branch"] == "main"
         assert details[0]["commit_sha"] == "abcdef12"
-        assert details[0]["commit_message"] == "Test commit"
         assert details[0]["event"] == "push"
     
     def test_extract_workflow_details_missing_fields(self):
@@ -62,7 +54,6 @@ class TestExtractWorkflowDetails:
         runs = [
             {
                 "name": "CI",
-                "id": 456,
                 "status": "in_progress",
                 # Missing many fields
             }
@@ -72,40 +63,42 @@ class TestExtractWorkflowDetails:
         
         assert len(details) == 1
         assert details[0]["workflow_name"] == "CI"
-        assert details[0]["workflow_id"] == "N/A"
+        assert details[0]["workflow_file"] == "N/A"
+        assert details[0]["workflow_url"] == "N/A"
+        assert details[0]["status"] == "in_progress"
         assert details[0]["conclusion"] == "N/A"
-        assert details[0]["actor"] == "N/A"
+        assert details[0]["run_started_at"] == "N/A"
         assert details[0]["branch"] == "N/A"
         assert details[0]["commit_sha"] == "N/A"
-        assert details[0]["commit_message"] == "N/A"
+        assert details[0]["event"] == "N/A"
     
-    def test_extract_workflow_details_multiline_commit_message(self):
-        """Test that multiline commit messages are truncated to first line."""
+    def test_extract_workflow_details_workflow_file(self):
+        """Test extracting workflow file path."""
         runs = [
             {
                 "name": "CI",
-                "id": 456,
-                "head_commit": {"message": "First line\nSecond line\nThird line"},
+                "path": ".github/workflows/test.yml",
+                "status": "completed",
             }
         ]
         
         details = main.extract_workflow_details(runs)
         
-        assert details[0]["commit_message"] == "First line"
+        assert details[0]["workflow_file"] == ".github/workflows/test.yml"
     
-    def test_extract_workflow_details_no_actor(self):
-        """Test handling when actor is None."""
+    def test_extract_workflow_details_missing_workflow_file(self):
+        """Test handling when workflow file path is missing."""
         runs = [
             {
                 "name": "CI",
-                "id": 456,
-                "actor": None,
+                "status": "completed",
+                # No path field
             }
         ]
         
         details = main.extract_workflow_details(runs)
         
-        assert details[0]["actor"] == "N/A"
+        assert details[0]["workflow_file"] == "N/A"
     
     def test_extract_workflow_details_empty_list(self):
         """Test extracting details from an empty list."""
@@ -122,20 +115,14 @@ class TestSaveToCSV:
         details = [
             {
                 "workflow_name": "CI",
-                "workflow_id": 123,
-                "run_id": 456,
-                "run_number": 1,
+                "workflow_file": ".github/workflows/ci.yml",
+                "workflow_url": "https://github.com/owner/repo/actions/runs/456",
                 "status": "completed",
                 "conclusion": "success",
-                "created_at": "2024-01-15T10:00:00Z",
-                "updated_at": "2024-01-15T10:05:00Z",
                 "run_started_at": "2024-01-15T10:01:00Z",
-                "actor": "testuser",
                 "branch": "main",
                 "commit_sha": "abcdef12",
-                "commit_message": "Test commit",
-                "event": "push",
-                "workflow_url": "https://github.com/owner/repo/actions/runs/456"
+                "event": "push"
             }
         ]
         
@@ -154,7 +141,7 @@ class TestSaveToCSV:
                 
                 assert len(rows) == 1
                 assert rows[0]["workflow_name"] == "CI"
-                assert rows[0]["run_id"] == "456"
+                assert rows[0]["workflow_file"] == ".github/workflows/ci.yml"
                 assert rows[0]["status"] == "completed"
         finally:
             os.unlink(filename)
@@ -182,37 +169,25 @@ class TestSaveToCSV:
         details = [
             {
                 "workflow_name": "CI",
-                "workflow_id": 123,
-                "run_id": 456,
-                "run_number": 1,
+                "workflow_file": ".github/workflows/ci.yml",
+                "workflow_url": "https://github.com/owner/repo/actions/runs/456",
                 "status": "completed",
                 "conclusion": "success",
-                "created_at": "2024-01-15T10:00:00Z",
-                "updated_at": "2024-01-15T10:05:00Z",
                 "run_started_at": "2024-01-15T10:01:00Z",
-                "actor": "testuser",
                 "branch": "main",
                 "commit_sha": "abcdef12",
-                "commit_message": "Test commit",
-                "event": "push",
-                "workflow_url": "https://github.com/owner/repo/actions/runs/456"
+                "event": "push"
             },
             {
                 "workflow_name": "Deploy",
-                "workflow_id": 124,
-                "run_id": 457,
-                "run_number": 2,
+                "workflow_file": ".github/workflows/deploy.yml",
+                "workflow_url": "https://github.com/owner/repo/actions/runs/457",
                 "status": "completed",
                 "conclusion": "failure",
-                "created_at": "2024-01-16T10:00:00Z",
-                "updated_at": "2024-01-16T10:05:00Z",
                 "run_started_at": "2024-01-16T10:01:00Z",
-                "actor": "anotheruser",
                 "branch": "develop",
                 "commit_sha": "fedcba98",
-                "commit_message": "Another commit",
-                "event": "pull_request",
-                "workflow_url": "https://github.com/owner/repo/actions/runs/457"
+                "event": "pull_request"
             }
         ]
         
@@ -946,20 +921,14 @@ class TestMain:
         details = [
             {
                 "workflow_name": "CI",
-                "workflow_id": 123,
-                "run_id": 456,
-                "run_number": 1,
+                "workflow_file": ".github/workflows/ci.yml",
+                "workflow_url": "https://github.com/owner/repo/actions/runs/456",
                 "status": "completed",
                 "conclusion": "success",
-                "created_at": "2024-01-15T10:00:00Z",
-                "updated_at": "2024-01-15T10:05:00Z",
                 "run_started_at": "2024-01-15T10:01:00Z",
-                "actor": "testuser",
                 "branch": "main",
                 "commit_sha": "abcdef12",
-                "commit_message": "Test commit",
-                "event": "push",
-                "workflow_url": "https://github.com/owner/repo/actions/runs/456"
+                "event": "push"
             }
         ]
         
