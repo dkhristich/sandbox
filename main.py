@@ -815,8 +815,9 @@ def _determine_output_path(args: argparse.Namespace) -> str:
         Full path to output CSV file
     """
     if args.output is None:
-        # Use default filename in output directory
-        output_filename = f"{args.owner}_{args.repo}_runs.csv"
+        # Use default filename in output directory with execution date
+        execution_date = datetime.now(timezone.utc).date().isoformat()
+        output_filename = f"{args.owner}_{args.repo}_runs_{execution_date}.csv"
         return os.path.join(args.output_dir, output_filename)
     elif os.path.isabs(args.output):
         # User provided an absolute path, use it as-is
@@ -873,7 +874,7 @@ def _create_argument_parser() -> argparse.ArgumentParser:
         "--output",
         type=str,
         default=None,
-        help="Output CSV filename (default: <owner>_<repo>_runs.csv). "
+        help="Output CSV filename (default: <owner>_<repo>_runs_YYYY-MM-DD.csv). "
              "If a full path is provided, it overrides --output-dir"
     )
     parser.add_argument(

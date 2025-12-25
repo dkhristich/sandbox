@@ -317,14 +317,19 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_single_page(self, mock_sleep, mock_get):
         """Test fetching workflow runs from a single page."""
+        _setup_test_logging()
         now = datetime.now(timezone.utc)
         
         # Create responses for 14 days, one day has a run
         mock_responses = _create_empty_day_responses(DEFAULT_DAYS)
         
         # Day 5 (5 days ago) will have a run
+        # Calculate the exact day start for day 5 to ensure the run is within range
+        day_5_start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=5)
+        day_5_run_time = day_5_start + timedelta(hours=12)  # Noon on that day
+        
         day_5_run = _create_mock_workflow_run(
-            created_at=now - timedelta(days=5, hours=12)
+            created_at=day_5_run_time
         )
         mock_responses[5] = _create_mock_api_response([day_5_run])
         
@@ -340,17 +345,20 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_pagination(self, mock_sleep, mock_get):
         """Test fetching workflow runs across multiple pages within a day."""
+        _setup_test_logging()
         now = datetime.now(timezone.utc)
         
         # Create responses for 14 days
         mock_responses = []
         for day_offset in range(DEFAULT_DAYS):
             if day_offset == 0:
-                # Day 0 will have pagination (2 pages)
+                # Day 0 (today) will have pagination (2 pages)
+                # Calculate today's start to ensure runs are within range
+                today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
                 runs_page1 = [
                     _create_mock_workflow_run(
                         run_id=i,
-                        created_at=now - timedelta(hours=i)
+                        created_at=today_start + timedelta(hours=i)
                     )
                     for i in range(1, 6)  # 5 runs
                 ]
@@ -371,15 +379,20 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_date_filtering(self, mock_sleep, mock_get):
         """Test that runs outside the date range are filtered out."""
+        _setup_test_logging()
         now = datetime.now(timezone.utc)
         
         # Create responses for 14 days
         mock_responses = _create_empty_day_responses(DEFAULT_DAYS)
         
         # Day 5 will have a run within range
+        # Calculate the exact day start for day 5 to ensure the run is within range
+        day_5_start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=5)
+        day_5_run_time = day_5_start + timedelta(hours=12)  # Noon on that day
+        
         day_5_run = _create_mock_workflow_run(
             run_id=1,
-            created_at=now - timedelta(days=5, hours=12)
+            created_at=day_5_run_time
         )
         mock_responses[5] = _create_mock_api_response([day_5_run])
         
@@ -394,6 +407,7 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_api_error(self, mock_sleep, mock_get):
         """Test handling of API errors."""
+        _setup_test_logging()
         mock_response = Mock()
         mock_response.status_code = 404
         mock_response.headers = _create_mock_rate_limit_headers()
@@ -410,6 +424,7 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_correct_url_and_headers(self, mock_sleep, mock_get):
         """Test that the correct URL and headers are used."""
+        _setup_test_logging()
         mock_responses = _create_empty_day_responses(7)
         mock_get.side_effect = mock_responses
         
@@ -434,6 +449,7 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_verify_ssl_false(self, mock_sleep, mock_get):
         """Test that verify_ssl=False is passed to requests."""
+        _setup_test_logging()
         mock_responses = _create_empty_day_responses(7)
         mock_get.side_effect = mock_responses
         
@@ -446,6 +462,7 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_verify_ssl_ca_bundle(self, mock_sleep, mock_get):
         """Test that verify_ssl with CA bundle path is passed to requests."""
+        _setup_test_logging()
         mock_responses = _create_empty_day_responses(7)
         mock_get.side_effect = mock_responses
         
@@ -477,6 +494,7 @@ class TestGetWorkflowRuns:
     @patch('main.time.sleep')
     def test_get_workflow_runs_rate_limit_handling(self, mock_sleep, mock_get):
         """Test that rate limit errors are handled with retry."""
+        _setup_test_logging()
         now = datetime.now(timezone.utc)
         reset_time = int((now + timedelta(seconds=5)).timestamp())
         
@@ -722,7 +740,8 @@ class TestMain:
             TEST_OWNER, TEST_REPO, TEST_TOKEN, DEFAULT_DAYS, verify_ssl=True
         )
         mock_extract.assert_called_once()
-        expected_path = os.path.join("./output", f"{TEST_OWNER}_{TEST_REPO}_runs.csv")
+        execution_date = datetime.now(timezone.utc).date().isoformat()
+        expected_path = os.path.join("./output", f"{TEST_OWNER}_{TEST_REPO}_runs_{execution_date}.csv")
         mock_save.assert_called_once_with([{"workflow_name": TEST_WORKFLOW_NAME}], expected_path)
     
     @patch('main.get_workflow_runs')
@@ -806,7 +825,8 @@ class TestMain:
         mock_get_runs.assert_called_once_with(
             "envowner", "envrepo", "envtoken", DEFAULT_DAYS, verify_ssl=True
         )
-        expected_path = os.path.join("./output", "envowner_envrepo_runs.csv")
+        execution_date = datetime.now(timezone.utc).date().isoformat()
+        expected_path = os.path.join("./output", f"envowner_envrepo_runs_{execution_date}.csv")
         mock_save.assert_called_once_with([], expected_path)
     
     @patch('main.get_workflow_runs')
@@ -902,7 +922,8 @@ class TestMain:
         with patch.object(sys, 'argv', ['main.py'] + test_args):
             main.main()
         
-        expected_path = os.path.join("custom_output", f"{TEST_OWNER}_{TEST_REPO}_runs.csv")
+        execution_date = datetime.now(timezone.utc).date().isoformat()
+        expected_path = os.path.join("custom_output", f"{TEST_OWNER}_{TEST_REPO}_runs_{execution_date}.csv")
         mock_save.assert_called_once_with([], expected_path)
     
     @patch('main.get_workflow_runs')

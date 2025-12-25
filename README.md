@@ -62,10 +62,10 @@ python main.py --owner <owner> --repo <repo> --token <token> --ca-bundle /path/t
 
 ### Output
 
-The script generates a CSV file in the `./output` directory by default. The default filename is `<owner>_<repo>_runs.csv` (e.g., `octocat_hello-world_runs.csv`). The output directory is created automatically if it doesn't exist.
+The script generates a CSV file in the `./output` directory by default. The default filename is `<owner>_<repo>_runs_YYYY-MM-DD.csv` (e.g., `octocat_hello-world_runs_2025-12-25.csv`), where the date is the execution date in UTC. The output directory is created automatically if it doesn't exist.
 
 **Output file location:**
-- Default: `./output/<owner>_<repo>_runs.csv`
+- Default: `./output/<owner>_<repo>_runs_YYYY-MM-DD.csv`
 - Use `--output-dir` to change the output directory
 - Use `--output` to specify a custom filename (or full path to override directory)
 
